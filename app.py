@@ -8,6 +8,7 @@ Run:  streamlit run app.py
 from __future__ import annotations
 
 import datetime as dt
+import glob as _glob
 import io
 import os
 
@@ -18,7 +19,28 @@ import streamlit as st
 
 from fac_parser import parse_workbook
 
-DATA_DEFAULT = os.path.join(os.path.dirname(__file__), "data", "FAC_Tracker_Gantt.xlsx")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _find_default_workbook():
+    """Locate a bundled workbook, tolerant of where/how it was uploaded."""
+    candidates = [
+        os.path.join(_HERE, "data", "FAC_Tracker_Gantt.xlsx"),
+        os.path.join(_HERE, "FAC_Tracker_Gantt.xlsx"),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    for pattern in (os.path.join(_HERE, "data", "*.xlsx"),
+                    os.path.join(_HERE, "*.xlsx")):
+        hits = [h for h in _glob.glob(pattern)
+                if not os.path.basename(h).startswith("~$")]
+        if hits:
+            return sorted(hits)[0]
+    return None
+
+
+DATA_DEFAULT = _find_default_workbook()
 
 # ---- pastel palette ---------------------------------------------------------
 PASTEL = {
@@ -31,10 +53,10 @@ PASTEL = {
     "Document": "#BFDBFE",
 }
 STATUS_COLORS = {
-    "Overdue": "#FCA5A5",   # soft red
-    "Due soon": "#FDE68A",  # soft amber
-    "On track": "#A7F3D0",  # soft green
-    "TBC": "#E5E7EB",       # grey
+    "Overdue": "#FCA5A5",
+    "Due soon": "#FDE68A",
+    "On track": "#A7F3D0",
+    "TBC": "#E5E7EB",
 }
 STATUS_TEXT = {
     "Overdue": "#991B1B", "Due soon": "#92400E",
@@ -44,7 +66,6 @@ STATUS_TEXT = {
 st.set_page_config(page_title="FAC & 1st Year Tracking",
                    page_icon="🌤️", layout="wide")
 
-# ---- global styling ---------------------------------------------------------
 st.markdown("""
 <style>
 :root { --card-radius: 16px; }
@@ -70,9 +91,8 @@ h1,h2,h3 { color:#3f3d56; font-weight:700; }
 """, unsafe_allow_html=True)
 
 
-# ---- data loading -----------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def load(file_bytes: bytes | None, today: dt.date):
+def load(file_bytes, today):
     src = io.BytesIO(file_bytes) if file_bytes else DATA_DEFAULT
     return parse_workbook(src, today=today)
 
@@ -90,23 +110,47 @@ def status_pill(s):
     return f'<span class="pill" style="background:{bg};color:{fg}">{s}</span>'
 
 
+def style_cells(df, func, subset):
+    """Apply cell styling across pandas versions (Styler.map or .applymap).
+
+    Falls back to the plain DataFrame if styling is unavailable, so the app
+    never crashes on the Styler.
+    """
+    try:
+        styler = df.style
+        fn = getattr(styler, "map", None) or styler.applymap
+        return fn(func, subset=subset)
+    except Exception:  # noqa
+        return df
+
+
 # ---- sidebar ----------------------------------------------------------------
 with st.sidebar:
     st.markdown("### 🌤️ FAC Dashboard")
     st.caption("Ampyr Solar Europe · FAC & 1st Year Testing")
-
     up = st.file_uploader("Upload updated FAC Tracker (.xlsx)", type=["xlsx"])
     st.caption("The dashboard refreshes automatically with your latest file.")
-
     today = st.date_input("Reference date ('today')", value=dt.date(2026, 7, 21),
                           help="Milestone statuses are calculated relative to this date.")
     st.divider()
 
 file_bytes = up.getvalue() if up else None
+
+if not file_bytes and DATA_DEFAULT is None:
+    st.title("FAC & 1st Year Testing Tracker")
+    st.info(
+        "👋 No data file found yet. Use the **Upload updated FAC Tracker (.xlsx)** "
+        "box in the left sidebar to load your workbook.\n\n"
+        "To make a file load automatically for everyone, add "
+        "`data/FAC_Tracker_Gantt.xlsx` to the app's GitHub repository."
+    )
+    st.stop()
+
 try:
     data = load(file_bytes, today)
 except Exception as e:  # noqa
     st.error(f"Could not read the workbook: {e}")
+    st.info("Try uploading the Excel file using the sidebar box on the left.")
     st.stop()
 
 sites = data["sites"].copy()
@@ -140,26 +184,20 @@ st.caption(f"Reference date: **{today:%d %b %Y}** · "
 fac_dates = sites_f["FAC Date"].dropna()
 fyt = sites_f["FYT Status"]
 c1, c2, c3, c4, c5 = st.columns(5)
-kpi(c1, "Sites tracked", len(sites_f),
-    f"{sites_f['Country'].nunique()} countries")
-kpi(c2, "FAC overdue", int((sites_f["FAC Status"] == "Overdue").sum()),
-    "past target date")
-kpi(c3, "FAC due ≤ 90 days", int((sites_f["FAC Status"] == "Due soon").sum()),
-    "approaching")
-kpi(c4, "1st-yr testing overdue", int((fyt == "Overdue").sum()),
-    "FYT past due")
+kpi(c1, "Sites tracked", len(sites_f), f"{sites_f['Country'].nunique()} countries")
+kpi(c2, "FAC overdue", int((sites_f["FAC Status"] == "Overdue").sum()), "past target date")
+kpi(c3, "FAC due ≤ 90 days", int((sites_f["FAC Status"] == "Due soon").sum()), "approaching")
+kpi(c4, "1st-yr testing overdue", int((fyt == "Overdue").sum()), "FYT past due")
 next_fac = fac_dates[fac_dates >= today].min() if (fac_dates >= today).any() else None
-kpi(c5, "Next FAC", f"{next_fac:%d %b %Y}" if next_fac else "—",
-    "earliest upcoming")
+kpi(c5, "Next FAC", f"{next_fac:%d %b %Y}" if next_fac else "—", "earliest upcoming")
 
 st.write("")
 
-# ---- tabs -------------------------------------------------------------------
 tab1, tab2, tab3, tab4 = st.tabs(
     ["📋 Site Overview", "📅 FAC Status & Dates",
      "🧪 1st Year Performance", "🗂️ Activities & Gantt"])
 
-# === TAB 1 : Site overview ===================================================
+# === TAB 1 ===================================================================
 with tab1:
     left, right = st.columns([1.35, 1])
     with left:
@@ -174,7 +212,7 @@ with tab1:
             if val in STATUS_COLORS:
                 return f"background-color:{STATUS_COLORS[val]};color:{STATUS_TEXT[val]};font-weight:600;"
             return ""
-        st.dataframe(show.style.applymap(_color, subset=["FYT Status", "FAC Status"]),
+        st.dataframe(style_cells(show, _color, ["FYT Status", "FAC Status"]),
                      use_container_width=True, hide_index=True, height=560)
     with right:
         st.subheader("FAC status mix")
@@ -189,24 +227,20 @@ with tab1:
 
         st.subheader("Sites by O&M contractor")
         cc = sites_f["Contractor"].value_counts()
-        figc = px.bar(x=cc.values, y=cc.index, orientation="h",
-                      color=cc.index,
+        figc = px.bar(x=cc.values, y=cc.index, orientation="h", color=cc.index,
                       color_discrete_sequence=list(PASTEL.values()))
         figc.update_layout(showlegend=False, margin=dict(t=10, b=10, l=10, r=10),
                            height=240, xaxis_title="", yaxis_title="",
-                           paper_bgcolor="rgba(0,0,0,0)",
-                           plot_bgcolor="rgba(0,0,0,0)")
+                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(figc, use_container_width=True)
 
-# === TAB 2 : FAC status & dates =============================================
+# === TAB 2 ===================================================================
 with tab2:
     st.subheader("Milestone timeline (FYT → FAC)")
     tl = ms_f.dropna(subset=["Date"]).copy()
     if not tl.empty:
-        # build a start/end per site connecting FYT to FAC
         piv = tl.pivot_table(index="Site", columns="Milestone", values="Date",
-                             aggfunc="first")
-        piv = piv.reset_index()
+                             aggfunc="first").reset_index()
         rows = []
         for _, r in piv.iterrows():
             fyt_d = r.get("First Year Testing")
@@ -220,7 +254,6 @@ with tab2:
             figt.update_yaxes(autorange="reversed")
             figt.add_vline(x=pd.Timestamp(today), line_width=2,
                            line_dash="dash", line_color="#F9A8B4")
-            # milestone dots
             figt.add_trace(go.Scatter(
                 x=tl[tl.Milestone == "First Year Testing"]["Date"],
                 y=tl[tl.Milestone == "First Year Testing"]["Site"],
@@ -233,8 +266,7 @@ with tab2:
                 marker=dict(size=13, color="#93C5FD", symbol="diamond",
                             line=dict(width=1, color="#fff"))))
             figt.update_layout(height=460, margin=dict(t=20, b=10, l=10, r=10),
-                               paper_bgcolor="rgba(0,0,0,0)",
-                               plot_bgcolor="rgba(0,0,0,0)",
+                               paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                                legend=dict(orientation="h", y=1.08))
             st.plotly_chart(figt, use_container_width=True)
             st.caption("Bar spans First Year Testing start → Final Acceptance. "
@@ -250,8 +282,7 @@ with tab2:
             for _, r in up_ms.head(12).iterrows():
                 days = (r["Date"] - today).days
                 st.markdown(
-                    f"**{r['Site']}** — {r['Milestone']}  "
-                    f"{status_pill(r['Status'])}<br>"
+                    f"**{r['Site']}** — {r['Milestone']}  {status_pill(r['Status'])}<br>"
                     f"<span style='color:#8a889f'>{r['Date']:%d %b %Y} · in {days} days</span>",
                     unsafe_allow_html=True)
     with colB:
@@ -263,12 +294,11 @@ with tab2:
             for _, r in od.iterrows():
                 days = (today - r["Date"]).days
                 st.markdown(
-                    f"**{r['Site']}** — {r['Milestone']}  "
-                    f"{status_pill('Overdue')}<br>"
+                    f"**{r['Site']}** — {r['Milestone']}  {status_pill('Overdue')}<br>"
                     f"<span style='color:#8a889f'>{r['Date']:%d %b %Y} · {days} days ago</span>",
                     unsafe_allow_html=True)
 
-# === TAB 3 : 1st year performance ===========================================
+# === TAB 3 ===================================================================
 with tab3:
     st.subheader("First Year Testing status")
     fy = sites_f.copy()
@@ -293,13 +323,10 @@ with tab3:
         st.markdown("**Testing activities by category**")
         tcat = tasks_f[tasks_f["Phase"] == "First Year Testing"]["Category"].value_counts()
         tcat = tcat[tcat.index != ""]
-        figb = px.bar(x=tcat.index, y=tcat.values, color=tcat.index,
-                      color_discrete_map=PASTEL)
-        figb.update_layout(showlegend=False, height=300,
-                           margin=dict(t=10, b=10, l=10, r=10),
+        figb = px.bar(x=tcat.index, y=tcat.values, color=tcat.index, color_discrete_map=PASTEL)
+        figb.update_layout(showlegend=False, height=300, margin=dict(t=10, b=10, l=10, r=10),
                            xaxis_title="", yaxis_title="activities",
-                           paper_bgcolor="rgba(0,0,0,0)",
-                           plot_bgcolor="rgba(0,0,0,0)")
+                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(figb, use_container_width=True)
 
     st.markdown("**First Year Testing schedule by site**")
@@ -310,10 +337,10 @@ with tab3:
     def _c2(v):
         return (f"background-color:{STATUS_COLORS[v]};color:{STATUS_TEXT[v]};font-weight:600;"
                 if v in STATUS_COLORS else "")
-    st.dataframe(fyt_tbl.style.applymap(_c2, subset=["FYT Status"]),
+    st.dataframe(style_cells(fyt_tbl, _c2, ["FYT Status"]),
                  use_container_width=True, hide_index=True)
 
-# === TAB 4 : activities & gantt =============================================
+# === TAB 4 ===================================================================
 with tab4:
     st.subheader("Activity Gantt")
     chips = "".join(
@@ -339,8 +366,7 @@ with tab4:
             figg.update_layout(height=max(400, 22 * len(gt)),
                                margin=dict(t=20, b=10, l=10, r=10),
                                legend=dict(orientation="h", y=1.04),
-                               paper_bgcolor="rgba(0,0,0,0)",
-                               plot_bgcolor="rgba(0,0,0,0)",
+                               paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                                yaxis_title="")
             st.plotly_chart(figg, use_container_width=True)
 
