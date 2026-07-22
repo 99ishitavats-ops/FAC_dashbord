@@ -1,6 +1,8 @@
 """
 Ampyr Solar Europe — FAC & 1st Year Testing Dashboard
 Light / pastel Streamlit dashboard built on the FAC Tracker (Gantt) workbook.
+Leads with real completion status (from the Status column) and keeps date
+timing as a secondary view.
 
 Run:  streamlit run app.py
 """
@@ -23,7 +25,6 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def _find_default_workbook():
-    """Locate a bundled workbook, tolerant of where/how it was uploaded."""
     candidates = [
         os.path.join(_HERE, "data", "FAC_Tracker_Gantt.xlsx"),
         os.path.join(_HERE, "FAC_Tracker_Gantt.xlsx"),
@@ -42,26 +43,32 @@ def _find_default_workbook():
 
 DATA_DEFAULT = _find_default_workbook()
 
-# ---- pastel palette ---------------------------------------------------------
+# ---- palettes ---------------------------------------------------------------
 PASTEL = {
-    "Prerequisite": "#C4B5FD",
-    "Compliance": "#6EE7B7",
-    "Closure": "#FDE68A",
-    "Financial": "#FED7AA",
-    "Technical": "#A5F3FC",
-    "Testing": "#FBCFE8",
+    "Prerequisite": "#C4B5FD", "Compliance": "#6EE7B7", "Closure": "#FDE68A",
+    "Financial": "#FED7AA", "Technical": "#A5F3FC", "Testing": "#FBCFE8",
     "Document": "#BFDBFE",
 }
-STATUS_COLORS = {
-    "Overdue": "#FCA5A5",
-    "Due soon": "#FDE68A",
-    "On track": "#A7F3D0",
-    "TBC": "#E5E7EB",
+# completion status (headline)
+COMP_COLORS = {
+    "Completed": "#A7F3D0", "In progress": "#FDE68A",
+    "Not started": "#FBC7CE", "No tasks": "#E5E7EB", "TBC": "#E5E7EB",
 }
-STATUS_TEXT = {
-    "Overdue": "#991B1B", "Due soon": "#92400E",
-    "On track": "#065F46", "TBC": "#374151",
+COMP_TEXT = {
+    "Completed": "#065F46", "In progress": "#92400E",
+    "Not started": "#9F1239", "No tasks": "#374151", "TBC": "#374151",
 }
+# date timing (secondary)
+TIME_COLORS = {
+    "Date passed": "#FCA5A5", "Due soon": "#FDE68A",
+    "Scheduled": "#A7F3D0", "TBC": "#E5E7EB",
+}
+TIME_TEXT = {
+    "Date passed": "#991B1B", "Due soon": "#92400E",
+    "Scheduled": "#065F46", "TBC": "#374151",
+}
+TASK_COLORS = {"Done": "#A7F3D0", "Pending": "#E5E7EB"}
+TASK_TEXT = {"Done": "#065F46", "Pending": "#4b5563"}
 
 st.set_page_config(page_title="FAC & 1st Year Tracking",
                    page_icon="🌤️", layout="wide")
@@ -73,11 +80,8 @@ st.markdown("""
 section[data-testid="stSidebar"] { background: #f7f5ff; }
 h1,h2,h3 { color:#3f3d56; font-weight:700; }
 .block-container { padding-top: 1.6rem; }
-.kpi {
-  background:#ffffff; border-radius:var(--card-radius); padding:18px 20px;
-  box-shadow:0 3px 14px rgba(120,120,160,0.10); border:1px solid #eef0f7;
-  height:100%;
-}
+.kpi { background:#ffffff; border-radius:var(--card-radius); padding:18px 20px;
+  box-shadow:0 3px 14px rgba(120,120,160,0.10); border:1px solid #eef0f7; height:100%; }
 .kpi .label { font-size:0.82rem; color:#7c7a94; font-weight:600;
   text-transform:uppercase; letter-spacing:.4px; }
 .kpi .value { font-size:2.0rem; font-weight:800; color:#3f3d56; line-height:1.1; }
@@ -86,7 +90,9 @@ h1,h2,h3 { color:#3f3d56; font-weight:700; }
   display:inline-block; }
 .legend-chip { display:inline-block; padding:3px 10px; margin:2px 4px 2px 0;
   border-radius:999px; font-size:0.75rem; color:#3f3d56; font-weight:600; }
-[data-testid="stMetricValue"] { color:#3f3d56; }
+.bar-wrap { background:#eef0f7; border-radius:999px; height:14px; width:100%; overflow:hidden; }
+.bar-fill { height:14px; border-radius:999px; }
+.site-row { padding:8px 0; border-bottom:1px solid #eef0f7; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -104,22 +110,27 @@ def kpi(col, label, value, sub=""):
         f'<div class="sub">{sub}</div></div>', unsafe_allow_html=True)
 
 
-def status_pill(s):
-    bg = STATUS_COLORS.get(s, "#E5E7EB")
-    fg = STATUS_TEXT.get(s, "#374151")
+def pill(s, colors, textmap):
+    bg = colors.get(s, "#E5E7EB")
+    fg = textmap.get(s, "#374151")
     return f'<span class="pill" style="background:{bg};color:{fg}">{s}</span>'
 
 
-def style_cells(df, func, subset):
-    """Apply cell styling across pandas versions (Styler.map or .applymap).
+def progress_bar(pct, status):
+    color = COMP_COLORS.get(status, "#A7F3D0")
+    return (f'<div class="bar-wrap"><div class="bar-fill" '
+            f'style="width:{pct}%;background:{color}"></div></div>')
 
-    Falls back to the plain DataFrame if styling is unavailable, so the app
-    never crashes on the Styler.
-    """
+
+def style_cells(df, mapping, subset):
+    def _fn(v):
+        if v in mapping[0]:
+            return f"background-color:{mapping[0][v]};color:{mapping[1][v]};font-weight:600;"
+        return ""
     try:
         styler = df.style
-        fn = getattr(styler, "map", None) or styler.applymap
-        return fn(func, subset=subset)
+        m = getattr(styler, "map", None) or styler.applymap
+        return m(_fn, subset=subset)
     except Exception:  # noqa
         return df
 
@@ -131,19 +142,15 @@ with st.sidebar:
     up = st.file_uploader("Upload updated FAC Tracker (.xlsx)", type=["xlsx"])
     st.caption("The dashboard refreshes automatically with your latest file.")
     today = st.date_input("Reference date ('today')", value=dt.date(2026, 7, 21),
-                          help="Milestone statuses are calculated relative to this date.")
+                          help="Date-timing labels are calculated relative to this date.")
     st.divider()
 
 file_bytes = up.getvalue() if up else None
 
 if not file_bytes and DATA_DEFAULT is None:
     st.title("FAC & 1st Year Testing Tracker")
-    st.info(
-        "👋 No data file found yet. Use the **Upload updated FAC Tracker (.xlsx)** "
-        "box in the left sidebar to load your workbook.\n\n"
-        "To make a file load automatically for everyone, add "
-        "`data/FAC_Tracker_Gantt.xlsx` to the app's GitHub repository."
-    )
+    st.info("👋 No data file found yet. Use the **Upload updated FAC Tracker (.xlsx)** "
+            "box in the sidebar, or add `data/FAC_Tracker_Gantt.xlsx` to the repo.")
     st.stop()
 
 try:
@@ -156,8 +163,8 @@ except Exception as e:  # noqa
 sites = data["sites"].copy()
 ms = data["milestones"].copy()
 tasks = data["tasks"].copy()
+has_status = data.get("has_status", False)
 
-# ---- sidebar filters --------------------------------------------------------
 with st.sidebar:
     st.markdown("#### Filters")
     countries = sorted([c for c in sites["Country"].dropna().unique() if c])
@@ -168,6 +175,8 @@ with st.sidebar:
         st.success("Using your uploaded file ✔")
     else:
         st.info("Showing the bundled tracker. Upload a file to update.")
+    if not has_status:
+        st.warning("No 'Status' column found — showing date timing only.")
 
 mask = sites["Country"].isin(sel_country) & sites["Contractor"].isin(sel_contractor)
 sites_f = sites[mask]
@@ -177,19 +186,23 @@ tasks_f = tasks[tasks["Site"].isin(keep)]
 
 # ---- header -----------------------------------------------------------------
 st.markdown("# FAC & 1st Year Testing Tracker")
-st.caption(f"Reference date: **{today:%d %b %Y}** · "
-           f"{len(sites_f)} sites · {len(tasks_f)} scheduled activities")
+st.caption(f"Reference date: **{today:%d %b %Y}** · {len(sites_f)} sites · "
+           f"{len(tasks_f)} activities")
 
 # ---- KPI row ----------------------------------------------------------------
+n_done = int((tasks_f["Status"] == "Done").sum())
+n_tasks = len(tasks_f)
+pct_all = round(100 * n_done / n_tasks) if n_tasks else 0
 fac_dates = sites_f["FAC Date"].dropna()
-fyt = sites_f["FYT Status"]
 c1, c2, c3, c4, c5 = st.columns(5)
 kpi(c1, "Sites tracked", len(sites_f), f"{sites_f['Country'].nunique()} countries")
-kpi(c2, "FAC overdue", int((sites_f["FAC Status"] == "Overdue").sum()), "past target date")
-kpi(c3, "FAC due ≤ 90 days", int((sites_f["FAC Status"] == "Due soon").sum()), "approaching")
-kpi(c4, "1st-yr testing overdue", int((fyt == "Overdue").sum()), "FYT past due")
+kpi(c2, "FYT completed", int((sites_f["FYT Status"] == "Completed").sum()),
+    f"of {len(sites_f)} sites")
+kpi(c3, "FAC completed", int((sites_f["FAC Status"] == "Completed").sum()),
+    f"of {len(sites_f)} sites")
+kpi(c4, "Tasks done", f"{n_done}/{n_tasks}", f"{pct_all}% complete")
 next_fac = fac_dates[fac_dates >= today].min() if (fac_dates >= today).any() else None
-kpi(c5, "Next FAC", f"{next_fac:%d %b %Y}" if next_fac else "—", "earliest upcoming")
+kpi(c5, "Next FAC date", f"{next_fac:%d %b %Y}" if next_fac else "—", "earliest upcoming")
 
 st.write("")
 
@@ -197,44 +210,44 @@ tab1, tab2, tab3, tab4 = st.tabs(
     ["📋 Site Overview", "📅 FAC Status & Dates",
      "🧪 1st Year Performance", "🗂️ Activities & Gantt"])
 
-# === TAB 1 ===================================================================
+# === TAB 1 : Site overview ===================================================
 with tab1:
-    left, right = st.columns([1.35, 1])
+    left, right = st.columns([1.5, 1])
     with left:
         st.subheader("Portfolio")
         show = sites_f.copy()
         show["FAC Date"] = show["FAC Date"].apply(lambda d: f"{d:%d %b %Y}" if pd.notnull(d) else "TBC")
         show["FYT Date"] = show["FYT Date"].apply(lambda d: f"{d:%d %b %Y}" if pd.notnull(d) else "TBC")
-        show = show[["Site", "Country", "Contractor", "FYT Date", "FYT Status",
-                     "FAC Date", "FAC Status"]]
-
-        def _color(val):
-            if val in STATUS_COLORS:
-                return f"background-color:{STATUS_COLORS[val]};color:{STATUS_TEXT[val]};font-weight:600;"
-            return ""
-        st.dataframe(style_cells(show, _color, ["FYT Status", "FAC Status"]),
+        show["FYT"] = show["FYT Progress %"].astype(int).astype(str) + "%"
+        show["FAC"] = show["FAC Progress %"].astype(int).astype(str) + "%"
+        show = show[["Site", "Country", "Contractor",
+                     "FYT Status", "FYT", "FYT Date",
+                     "FAC Status", "FAC", "FAC Date"]]
+        st.dataframe(style_cells(show, (COMP_COLORS, COMP_TEXT),
+                                 ["FYT Status", "FAC Status"]),
                      use_container_width=True, hide_index=True, height=560)
     with right:
-        st.subheader("FAC status mix")
-        vc = sites_f["FAC Status"].value_counts()
+        st.subheader("First Year Testing status")
+        vc = sites_f["FYT Status"].value_counts()
         fig = px.pie(values=vc.values, names=vc.index, hole=0.55,
-                     color=vc.index, color_discrete_map=STATUS_COLORS)
-        fig.update_traces(textinfo="value+percent", textfont_size=13)
-        fig.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=260,
-                          legend=dict(orientation="h", y=-0.1),
+                     color=vc.index, color_discrete_map=COMP_COLORS)
+        fig.update_traces(textinfo="value")
+        fig.update_layout(margin=dict(t=6, b=6, l=6, r=6), height=240,
+                          legend=dict(orientation="h", y=-0.15),
                           paper_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig, use_container_width=True)
 
-        st.subheader("Sites by O&M contractor")
-        cc = sites_f["Contractor"].value_counts()
-        figc = px.bar(x=cc.values, y=cc.index, orientation="h", color=cc.index,
-                      color_discrete_sequence=list(PASTEL.values()))
-        figc.update_layout(showlegend=False, margin=dict(t=10, b=10, l=10, r=10),
-                           height=240, xaxis_title="", yaxis_title="",
-                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(figc, use_container_width=True)
+        st.subheader("FAC status")
+        vc2 = sites_f["FAC Status"].value_counts()
+        fig2 = px.pie(values=vc2.values, names=vc2.index, hole=0.55,
+                      color=vc2.index, color_discrete_map=COMP_COLORS)
+        fig2.update_traces(textinfo="value")
+        fig2.update_layout(margin=dict(t=6, b=6, l=6, r=6), height=240,
+                           legend=dict(orientation="h", y=-0.15),
+                           paper_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig2, use_container_width=True)
 
-# === TAB 2 ===================================================================
+# === TAB 2 : FAC status & dates =============================================
 with tab2:
     st.subheader("Milestone timeline (FYT → FAC)")
     tl = ms_f.dropna(subset=["Date"]).copy()
@@ -243,8 +256,7 @@ with tab2:
                              aggfunc="first").reset_index()
         rows = []
         for _, r in piv.iterrows():
-            fyt_d = r.get("First Year Testing")
-            fac_d = r.get("FAC")
+            fyt_d, fac_d = r.get("First Year Testing"), r.get("FAC")
             if pd.notnull(fyt_d) and pd.notnull(fac_d):
                 rows.append({"Site": r["Site"], "Start": fyt_d, "Finish": fac_d})
         if rows:
@@ -260,8 +272,7 @@ with tab2:
                 mode="markers", name="FYT",
                 marker=dict(size=12, color="#F9A8D4", line=dict(width=1, color="#fff"))))
             figt.add_trace(go.Scatter(
-                x=tl[tl.Milestone == "FAC"]["Date"],
-                y=tl[tl.Milestone == "FAC"]["Site"],
+                x=tl[tl.Milestone == "FAC"]["Date"], y=tl[tl.Milestone == "FAC"]["Site"],
                 mode="markers", name="FAC",
                 marker=dict(size=13, color="#93C5FD", symbol="diamond",
                             line=dict(width=1, color="#fff"))))
@@ -274,78 +285,87 @@ with tab2:
 
     colA, colB = st.columns(2)
     with colA:
-        st.subheader("Upcoming milestones")
+        st.subheader("Upcoming milestone dates")
         up_ms = ms_f[(ms_f["Date"].notna()) & (ms_f["Date"] >= today)].sort_values("Date")
         if up_ms.empty:
-            st.info("No upcoming milestones after the reference date.")
+            st.info("No upcoming milestone dates after the reference date.")
         else:
             for _, r in up_ms.head(12).iterrows():
                 days = (r["Date"] - today).days
                 st.markdown(
-                    f"**{r['Site']}** — {r['Milestone']}  {status_pill(r['Status'])}<br>"
-                    f"<span style='color:#8a889f'>{r['Date']:%d %b %Y} · in {days} days</span>",
-                    unsafe_allow_html=True)
+                    f"**{r['Site']}** — {r['Milestone']}  "
+                    f"{pill(r['Status'], COMP_COLORS, COMP_TEXT)} "
+                    f"{pill(r['Timing'], TIME_COLORS, TIME_TEXT)}<br>"
+                    f"<span style='color:#8a889f'>{r['Date']:%d %b %Y} · in {days} days · "
+                    f"{r['Progress %']}% done</span>", unsafe_allow_html=True)
     with colB:
-        st.subheader("Overdue milestones")
-        od = ms_f[ms_f["Status"] == "Overdue"].sort_values("Date")
-        if od.empty:
-            st.success("Nothing overdue 🎉")
+        st.subheader("Milestones not yet complete")
+        inc = ms_f[ms_f["Status"] != "Completed"].sort_values("Date", na_position="last")
+        if inc.empty:
+            st.success("All milestones complete 🎉")
         else:
-            for _, r in od.iterrows():
-                days = (today - r["Date"]).days
+            for _, r in inc.head(14).iterrows():
+                dtxt = f"{r['Date']:%d %b %Y}" if pd.notnull(r["Date"]) else "date TBC"
                 st.markdown(
-                    f"**{r['Site']}** — {r['Milestone']}  {status_pill('Overdue')}<br>"
-                    f"<span style='color:#8a889f'>{r['Date']:%d %b %Y} · {days} days ago</span>",
-                    unsafe_allow_html=True)
+                    f"**{r['Site']}** — {r['Milestone']}  "
+                    f"{pill(r['Status'], COMP_COLORS, COMP_TEXT)}<br>"
+                    f"<span style='color:#8a889f'>{dtxt} · {r['Progress %']}% done "
+                    f"({r['Done']}/{r['Total']} tasks)</span>", unsafe_allow_html=True)
 
-# === TAB 3 ===================================================================
+# === TAB 3 : 1st year performance ===========================================
 with tab3:
-    st.subheader("First Year Testing status")
+    st.subheader("First Year Testing — completion")
     fy = sites_f.copy()
-    vc = fy["FYT Status"].value_counts()
-    c1, c2, c3 = st.columns([1, 1, 1.2])
-    kpi(c1, "FYT scheduled", int((fy["FYT Date"].notna()).sum()), "with a date set")
-    kpi(c2, "FYT overdue", int((fy["FYT Status"] == "Overdue").sum()), "need attention")
-    kpi(c3, "FYT due ≤ 90 days", int((fy["FYT Status"] == "Due soon").sum()), "approaching")
+    c1, c2, c3, c4 = st.columns(4)
+    kpi(c1, "Completed", int((fy["FYT Status"] == "Completed").sum()), "sites")
+    kpi(c2, "In progress", int((fy["FYT Status"] == "In progress").sum()), "sites")
+    kpi(c3, "Not started", int((fy["FYT Status"] == "Not started").sum()), "sites")
+    fyt_tasks = tasks_f[tasks_f["Phase"] == "First Year Testing"]
+    fd = int((fyt_tasks["Status"] == "Done").sum())
+    kpi(c4, "FYT tasks done", f"{fd}/{len(fyt_tasks)}",
+        f"{round(100*fd/len(fyt_tasks)) if len(fyt_tasks) else 0}% complete")
     st.write("")
 
-    l, r = st.columns([1, 1])
+    st.markdown("**Progress by site**")
+    for _, r in fy.sort_values("FYT Progress %", ascending=False).iterrows():
+        pctv = int(r["FYT Progress %"])
+        cL, cM, cR = st.columns([2, 5, 2])
+        cL.markdown(f"**{r['Site']}**")
+        cM.markdown(progress_bar(pctv, r["FYT Status"]), unsafe_allow_html=True)
+        cR.markdown(f"{pctv}%  {pill(r['FYT Status'], COMP_COLORS, COMP_TEXT)}",
+                    unsafe_allow_html=True)
+
+    st.write("")
+    l, r = st.columns(2)
     with l:
         st.markdown("**FYT status breakdown**")
+        vc = fy["FYT Status"].value_counts()
         figp = px.pie(values=vc.values, names=vc.index, hole=0.55,
-                      color=vc.index, color_discrete_map=STATUS_COLORS)
-        figp.update_traces(textinfo="value+percent")
+                      color=vc.index, color_discrete_map=COMP_COLORS)
+        figp.update_traces(textinfo="value")
         figp.update_layout(height=300, margin=dict(t=10, b=10, l=10, r=10),
                            legend=dict(orientation="h", y=-0.1),
                            paper_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(figp, use_container_width=True)
     with r:
-        st.markdown("**Testing activities by category**")
-        tcat = tasks_f[tasks_f["Phase"] == "First Year Testing"]["Category"].value_counts()
-        tcat = tcat[tcat.index != ""]
-        figb = px.bar(x=tcat.index, y=tcat.values, color=tcat.index, color_discrete_map=PASTEL)
-        figb.update_layout(showlegend=False, height=300, margin=dict(t=10, b=10, l=10, r=10),
-                           xaxis_title="", yaxis_title="activities",
-                           paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(figb, use_container_width=True)
+        st.markdown("**FYT tasks: done vs pending by category**")
+        ft = fyt_tasks.copy()
+        ft = ft[ft["Category"] != ""]
+        if not ft.empty:
+            g = ft.groupby(["Category", "Status"]).size().reset_index(name="n")
+            figb = px.bar(g, x="Category", y="n", color="Status",
+                          color_discrete_map=TASK_COLORS, barmode="stack")
+            figb.update_layout(height=300, margin=dict(t=10, b=10, l=10, r=10),
+                               xaxis_title="", yaxis_title="tasks",
+                               legend=dict(orientation="h", y=1.1),
+                               paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(figb, use_container_width=True)
 
-    st.markdown("**First Year Testing schedule by site**")
-    fyt_tbl = fy[["Site", "Country", "Contractor", "FYT Date", "FYT Status"]].copy()
-    fyt_tbl["FYT Date"] = fyt_tbl["FYT Date"].apply(
-        lambda d: f"{d:%d %b %Y}" if pd.notnull(d) else "TBC")
-
-    def _c2(v):
-        return (f"background-color:{STATUS_COLORS[v]};color:{STATUS_TEXT[v]};font-weight:600;"
-                if v in STATUS_COLORS else "")
-    st.dataframe(style_cells(fyt_tbl, _c2, ["FYT Status"]),
-                 use_container_width=True, hide_index=True)
-
-# === TAB 4 ===================================================================
+# === TAB 4 : activities & gantt =============================================
 with tab4:
     st.subheader("Activity Gantt")
-    chips = "".join(
-        f'<span class="legend-chip" style="background:{c}">{k}</span>'
-        for k, c in PASTEL.items())
+    chips = "".join(f'<span class="legend-chip" style="background:{c}">{k}</span>'
+                    for k, c in PASTEL.items())
     st.markdown(chips, unsafe_allow_html=True)
 
     site_opts = list(sites_f["Site"])
@@ -357,10 +377,13 @@ with tab4:
             st.info("No scheduled Gantt bars for this site (dates To Be Confirmed).")
         else:
             gt["Label"] = gt["Sub-Task"].where(gt["Sub-Task"] != "", gt["Task"])
+            gt["Label"] = gt.apply(
+                lambda x: ("✓ " if x["Status"] == "Done" else "") + x["Label"], axis=1)
             gt = gt.iloc[::-1]
             figg = px.timeline(gt, x_start="Start", x_end="End", y="Label",
                                color="Category", color_discrete_map=PASTEL,
-                               hover_data=["Phase", "Task", "Responsibility", "Accepted By"])
+                               hover_data=["Phase", "Task", "Status",
+                                           "Responsibility", "Accepted By"])
             figg.add_vline(x=pd.Timestamp(today), line_width=2,
                            line_dash="dash", line_color="#F9A8B4")
             figg.update_layout(height=max(400, 22 * len(gt)),
@@ -369,23 +392,31 @@ with tab4:
                                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                                yaxis_title="")
             st.plotly_chart(figg, use_container_width=True)
+            done_here = int((gt["Status"] == "Done").sum())
+            st.caption(f"✓ marks completed tasks · {done_here}/{len(gt)} done for this site.")
 
     st.subheader("All activities")
     tbl = tasks_f.copy()
     for c in ["Start", "End"]:
         tbl[c] = tbl[c].apply(lambda d: f"{d:%d %b %Y}" if pd.notnull(d) else "")
-    fcat = st.multiselect("Filter by category",
+    f1, f2 = st.columns(2)
+    fcat = f1.multiselect("Filter by category",
                           sorted([c for c in tbl["Category"].unique() if c]))
+    fstat = f2.multiselect("Filter by status", ["Done", "Pending"])
     if fcat:
         tbl = tbl[tbl["Category"].isin(fcat)]
-    st.dataframe(tbl[["Site", "Phase", "Task", "Sub-Task", "Category",
-                      "Responsibility", "Accepted By", "Start", "End"]],
+    if fstat:
+        tbl = tbl[tbl["Status"].isin(fstat)]
+    view = tbl[["Site", "Phase", "Task", "Sub-Task", "Category", "Status",
+                "Responsibility", "Accepted By", "Start", "End"]]
+    st.dataframe(style_cells(view, (TASK_COLORS, TASK_TEXT), ["Status"]),
                  use_container_width=True, hide_index=True, height=460)
     st.download_button("⬇️ Download filtered activities (CSV)",
-                       tbl.to_csv(index=False).encode(),
+                       view.to_csv(index=False).encode(),
                        file_name="fac_activities.csv", mime="text/csv")
 
 st.divider()
-st.caption("Statuses are derived from milestone dates vs the reference date "
-           "(Overdue < today ≤ Due soon ≤ 90 days < On track). "
-           "The source workbook does not record completion, so labels reflect timing only.")
+st.caption("Headline status comes from the workbook's Status column "
+           "(Completed / In progress / Not started, based on tasks marked 'Done'). "
+           "Date timing (Date passed / Due soon / Scheduled) is relative to the "
+           "reference date and shown as a secondary indicator.")

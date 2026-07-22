@@ -1,17 +1,15 @@
 """
 Parser for the Ampyr FAC Tracker (Gantt) Excel workbook.
 
-The workbook is a weekly Gantt sheet:
-  * Columns A-H hold metadata (Site Name, FAC Date, O&M Contractor, Task,
-    Sub-Task, Responsibility, Accepted By, Dates as per testing).
-  * Columns 9.. are one-week-each Gantt columns. Coloured cells form the task
-    bars; the fill colour encodes the task category (see CATEGORY_COLORS).
-  * A "today marker" cell sits at column 89 which corresponds to 14-Jul-2026,
-    letting us map every Gantt column to a real calendar date
-    (7 days per column).
-
-The parser re-detects the anchor from the pink today-marker fill each run, so
-it survives small layout shifts when an updated file is uploaded.
+Layout (auto-detected, so it survives inserted columns):
+  * Columns A-H  : Site Name, FAC Date, O&M Contractor, Task, Sub-Task,
+                   Responsibility, Accepted By, Dates as per testing.
+  * A "Status"   : optional column (value "Done" = task completed, blank = not).
+  * Gantt columns: one week each; coloured cells are task bars, the fill colour
+                   encodes the category. The first Gantt column is found from the
+                   4-digit year in row 1.
+  * A pink "today marker" cell anchors the weekly columns to real dates
+    (marker week = 14-Jul-2026, 7 days per column).
 """
 
 from __future__ import annotations
@@ -21,7 +19,6 @@ from datetime import date, datetime, timedelta
 import openpyxl
 import pandas as pd
 
-# Legend fill colours -> category
 CATEGORY_COLORS = {
     "FFC4B5FD": "Prerequisite",
     "FF6EE7B7": "Compliance",
@@ -33,10 +30,14 @@ CATEGORY_COLORS = {
 }
 
 TODAY_MARKER_FILL = "FFFEE2E2"
-DEFAULT_ANCHOR_COL = 89
 DEFAULT_ANCHOR_DATE = date(2026, 7, 14)
 FIRST_METADATA_ROW = 4
-FIRST_GANTT_COL = 9
+
+# metadata column positions (1-based) — stable, Status/Gantt are added after these
+COL_SITE, COL_FACDATE, COL_OM = 1, 2, 3
+COL_TASK, COL_SUBTASK, COL_RESP, COL_ACCEPT, COL_TESTDATE = 4, 5, 6, 7, 8
+
+DONE_TOKENS = {"done", "yes", "y", "complete", "completed", "✓", "true", "x"}
 
 
 def _fill_hex(cell):
@@ -48,16 +49,37 @@ def _fill_hex(cell):
     return None
 
 
-def _find_anchor(ws):
+def _detect_layout(ws):
+    """Return (status_col or None, first_gantt_col)."""
+    status_col = None
+    gantt_col = None
+    for c in range(1, ws.max_column + 1):
+        v = ws.cell(row=1, column=c).value
+        if isinstance(v, str) and v.strip().lower() == "status":
+            status_col = c
+        if gantt_col is None and v is not None:
+            s = str(v).strip()
+            if s.isdigit() and len(s) == 4 and 2000 <= int(s) <= 2100:
+                gantt_col = c
+    if gantt_col is None:
+        gantt_col = (status_col + 1) if status_col else 9
+    return status_col, gantt_col
+
+
+def _find_anchor(ws, first_gantt_col):
     for r in range(1, 4):
-        for c in range(FIRST_GANTT_COL, ws.max_column + 1):
+        for c in range(first_gantt_col, ws.max_column + 1):
             if _fill_hex(ws.cell(row=r, column=c)) == TODAY_MARKER_FILL:
                 return c, DEFAULT_ANCHOR_DATE
-    return DEFAULT_ANCHOR_COL, DEFAULT_ANCHOR_DATE
+    return first_gantt_col + 80, DEFAULT_ANCHOR_DATE
 
 
 def _col_to_date(col, anchor_col, anchor_date):
     return anchor_date + timedelta(weeks=(col - anchor_col))
+
+
+def _is_done(v):
+    return isinstance(v, str) and v.strip().lower() in DONE_TOKENS or v is True
 
 
 def _parse_header(text):
@@ -91,15 +113,25 @@ def _parse_date_any(v):
     return None
 
 
-def _status_for(d, today):
+def _timing(d, today):
     if d is None:
         return "TBC"
     delta = (d - today).days
     if delta < 0:
-        return "Overdue"
+        return "Date passed"
     if delta <= 90:
         return "Due soon"
-    return "On track"
+    return "Scheduled"
+
+
+def _completion_status(done, total):
+    if total == 0:
+        return "No tasks"
+    if done >= total:
+        return "Completed"
+    if done > 0:
+        return "In progress"
+    return "Not started"
 
 
 def parse_workbook(source, today=None):
@@ -110,36 +142,37 @@ def parse_workbook(source, today=None):
 
     wb = openpyxl.load_workbook(source, data_only=True)
     ws = wb[wb.sheetnames[0]]
-    anchor_col, anchor_date = _find_anchor(ws)
+    status_col, first_gantt = _detect_layout(ws)
+    anchor_col, anchor_date = _find_anchor(ws, first_gantt)
 
     sites, milestones, tasks = [], [], []
     cur_site = cur_phase = cur_task = None
+    phase_agg = {}  # (site, phase) -> [done, total]
 
     for r in range(FIRST_METADATA_ROW, ws.max_row + 1):
-        A = ws.cell(row=r, column=1).value
-        D = ws.cell(row=r, column=4).value
-        E = ws.cell(row=r, column=5).value
-        F = ws.cell(row=r, column=6).value
-        G = ws.cell(row=r, column=7).value
-        H = ws.cell(row=r, column=8).value
+        A = ws.cell(row=r, column=COL_SITE).value
+        D = ws.cell(row=r, column=COL_TASK).value
+        E = ws.cell(row=r, column=COL_SUBTASK).value
+        F = ws.cell(row=r, column=COL_RESP).value
+        G = ws.cell(row=r, column=COL_ACCEPT).value
+        H = ws.cell(row=r, column=COL_TESTDATE).value
+        S = ws.cell(row=r, column=status_col).value if status_col else None
 
         a_txt = str(A).strip() if A is not None else ""
         d_txt = str(D).strip() if D is not None else ""
         e_txt = str(E).strip() if E is not None else ""
+        done_flag = _is_done(S)
 
         if a_txt and "|" in a_txt:
             name, country, contractor, fac_raw = _parse_header(a_txt)
-            cur_site = {
-                "Site": name, "Country": country, "Contractor": contractor,
-                "FAC Date": _parse_date_any(fac_raw), "FYT Date": None,
-            }
+            cur_site = {"Site": name, "Country": country, "Contractor": contractor,
+                        "FAC Date": _parse_date_any(fac_raw), "FYT Date": None}
             sites.append(cur_site)
             cur_phase = cur_task = None
             continue
 
         if cur_site is None:
             continue
-
         if a_txt and a_txt.lower() == cur_site["Site"].lower():
             continue
 
@@ -154,11 +187,11 @@ def parse_workbook(source, today=None):
             phase_date = _parse_date_any(H)
             if cur_phase == "First Year Testing":
                 cur_site["FYT Date"] = phase_date
-            milestones.append({
-                "Site": cur_site["Site"], "Country": cur_site["Country"],
-                "Contractor": cur_site["Contractor"],
-                "Milestone": cur_phase, "Date": phase_date,
-            })
+            milestones.append({"Site": cur_site["Site"], "Country": cur_site["Country"],
+                               "Contractor": cur_site["Contractor"],
+                               "Milestone": cur_phase, "Date": phase_date,
+                               "PhaseHeaderDone": done_flag})
+            phase_agg.setdefault((cur_site["Site"], cur_phase), [0, 0])
             cur_task = None
             continue
 
@@ -169,7 +202,7 @@ def parse_workbook(source, today=None):
 
         start_col = end_col = None
         counts = {}
-        for c in range(FIRST_GANTT_COL, ws.max_column + 1):
+        for c in range(first_gantt, ws.max_column + 1):
             hexc = _fill_hex(ws.cell(row=r, column=c))
             if hexc in CATEGORY_COLORS:
                 if start_col is None:
@@ -181,33 +214,76 @@ def parse_workbook(source, today=None):
         start_date = _col_to_date(start_col, anchor_col, anchor_date) if start_col else None
         end_date = (_col_to_date(end_col, anchor_col, anchor_date) + timedelta(days=6)) if end_col else None
 
-        tasks.append({
-            "Site": cur_site["Site"], "Country": cur_site["Country"],
-            "Contractor": cur_site["Contractor"], "Phase": cur_phase or "",
-            "Task": cur_task or "", "Sub-Task": e_txt,
-            "Responsibility": str(F).strip() if F else "",
-            "Accepted By": str(G).strip() if G else "",
-            "Category": category, "Start": start_date, "End": end_date,
-        })
+        key = (cur_site["Site"], cur_phase)
+        agg = phase_agg.setdefault(key, [0, 0])
+        agg[1] += 1
+        if done_flag:
+            agg[0] += 1
+
+        tasks.append({"Site": cur_site["Site"], "Country": cur_site["Country"],
+                      "Contractor": cur_site["Contractor"], "Phase": cur_phase or "",
+                      "Task": cur_task or "", "Sub-Task": e_txt,
+                      "Responsibility": str(F).strip() if F else "",
+                      "Accepted By": str(G).strip() if G else "",
+                      "Category": category, "Start": start_date, "End": end_date,
+                      "Status": "Done" if done_flag else "Pending"})
 
     df_sites = pd.DataFrame(sites)
     df_ms = pd.DataFrame(milestones)
     df_tasks = pd.DataFrame(tasks)
 
-    if not df_sites.empty:
-        df_sites["FAC Status"] = df_sites["FAC Date"].apply(lambda d: _status_for(d, today))
-        df_sites["FYT Status"] = df_sites["FYT Date"].apply(lambda d: _status_for(d, today))
+    # ---- roll up completion onto milestones & sites ----
+    def phase_done_total(site, phase):
+        return phase_agg.get((site, phase), [0, 0])
+
     if not df_ms.empty:
-        df_ms["Status"] = df_ms["Date"].apply(lambda d: _status_for(d, today))
+        st_list, done_list, tot_list, pct_list, timing_list = [], [], [], [], []
+        for _, r in df_ms.iterrows():
+            d, t = phase_done_total(r["Site"], r["Milestone"])
+            if t > 0 and d == t:
+                header_done = True
+            else:
+                header_done = bool(r.get("PhaseHeaderDone"))
+                if header_done:  # phase flagged done at header -> treat as complete
+                    d, t = (t, t) if t else (1, 1)
+            status = _completion_status(d, t)
+            done_list.append(d); tot_list.append(t)
+            pct_list.append(round(100 * d / t) if t else 0)
+            st_list.append(status)
+            timing_list.append(_timing(r["Date"], today))
+        df_ms["Done"] = done_list
+        df_ms["Total"] = tot_list
+        df_ms["Progress %"] = pct_list
+        df_ms["Status"] = st_list
+        df_ms["Timing"] = timing_list
+
+    if not df_sites.empty:
+        for lab, phase in [("FYT", "First Year Testing"), ("FAC", "FAC")]:
+            dts = df_sites["Site"].apply(lambda s: phase_done_total(s, phase))
+            df_sites[f"{lab} Done"] = dts.apply(lambda x: x[0])
+            df_sites[f"{lab} Total"] = dts.apply(lambda x: x[1])
+            df_sites[f"{lab} Progress %"] = dts.apply(
+                lambda x: round(100 * x[0] / x[1]) if x[1] else 0)
+            df_sites[f"{lab} Status"] = dts.apply(lambda x: _completion_status(x[0], x[1]))
+        # honour a phase-header "Done" flag even when task rows are blank
+        if not df_ms.empty:
+            for lab, phase in [("FYT", "First Year Testing"), ("FAC", "FAC")]:
+                hdr = df_ms[df_ms["Milestone"] == phase].set_index("Site")["Status"]
+                df_sites[f"{lab} Status"] = df_sites.apply(
+                    lambda row: hdr.get(row["Site"], row[f"{lab} Status"]), axis=1)
+        df_sites["FAC Timing"] = df_sites["FAC Date"].apply(lambda d: _timing(d, today))
+        df_sites["FYT Timing"] = df_sites["FYT Date"].apply(lambda d: _timing(d, today))
 
     return {"sites": df_sites, "milestones": df_ms, "tasks": df_tasks,
-            "today": today, "anchor_col": anchor_col, "anchor_date": anchor_date}
+            "today": today, "anchor_col": anchor_col, "anchor_date": anchor_date,
+            "has_status": status_col is not None}
 
 
 if __name__ == "__main__":
     import sys
     data = parse_workbook(sys.argv[1], today=date(2026, 7, 21))
-    print("SITES\n", data["sites"].to_string())
-    print("\nMILESTONES\n", data["milestones"].to_string())
-    print("\nTASKS:", len(data["tasks"]), "rows")
-    print(data["tasks"].head(12).to_string())
+    print("has_status:", data["has_status"])
+    cols = ["Site", "FYT Done", "FYT Total", "FYT Status",
+            "FAC Done", "FAC Total", "FAC Status"]
+    print(data["sites"][cols].to_string(index=False))
+    print("\nTask status counts:\n", data["tasks"]["Status"].value_counts())
