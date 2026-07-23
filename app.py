@@ -338,6 +338,9 @@ TIME_TEXT = {
     "Scheduled": "#065F46", "TBC": "#374151",
 }
 TASK_COLORS = {"Done": "#A7F3D0", "Pending": "#E5E7EB"}
+GREEN_DONE = "#34D399"          # milestone dot when completed
+FYT_COL_BG = "#EAF2FF"          # 1st Year Testing column tint (blue)
+FAC_COL_BG = "#FFF1E6"          # FAC column tint (peach)
 TASK_TEXT = {"Done": "#065F46", "Pending": "#4b5563"}
 
 st.set_page_config(page_title="FAC & 1st Year Tracking",
@@ -401,6 +404,34 @@ def style_cells(df, mapping, subset):
         styler = df.style
         m = getattr(styler, "map", None) or styler.applymap
         return m(_fn, subset=subset)
+    except Exception:  # noqa
+        return df
+
+
+def style_portfolio(df):
+    """Tint 1st Year Testing columns (blue) and FAC columns (peach); keep the
+    Status cells coloured by completion so both groups are easy to tell apart."""
+    fyt_cols = ["FYT Status", "FYT %", "FYT Date"]
+    fac_cols = ["FAC Status", "FAC %", "FAC Date"]
+
+    def _row(row):
+        out = []
+        for col in df.columns:
+            style = ""
+            if col in fyt_cols:
+                style = f"background-color:{FYT_COL_BG};"
+            elif col in fac_cols:
+                style = f"background-color:{FAC_COL_BG};"
+            if col in ("FYT Status", "FAC Status"):
+                v = row[col]
+                if v in COMP_COLORS:
+                    style = (f"background-color:{COMP_COLORS[v]};"
+                             f"color:{COMP_TEXT[v]};font-weight:700;")
+            out.append(style)
+        return out
+
+    try:
+        return df.style.apply(_row, axis=1)
     except Exception:  # noqa
         return df
 
@@ -488,13 +519,13 @@ with tab1:
         show = sites_f.copy()
         show["FAC Date"] = show["FAC Date"].apply(lambda d: f"{d:%d %b %Y}" if pd.notnull(d) else "TBC")
         show["FYT Date"] = show["FYT Date"].apply(lambda d: f"{d:%d %b %Y}" if pd.notnull(d) else "TBC")
-        show["FYT"] = show["FYT Progress %"].astype(int).astype(str) + "%"
-        show["FAC"] = show["FAC Progress %"].astype(int).astype(str) + "%"
+        show["FYT %"] = show["FYT Progress %"].astype(int).astype(str) + "%"
+        show["FAC %"] = show["FAC Progress %"].astype(int).astype(str) + "%"
         show = show[["Site", "Country", "Contractor",
-                     "FYT Status", "FYT", "FYT Date",
-                     "FAC Status", "FAC", "FAC Date"]]
-        st.dataframe(style_cells(show, (COMP_COLORS, COMP_TEXT),
-                                 ["FYT Status", "FAC Status"]),
+                     "FYT Status", "FYT %", "FYT Date",
+                     "FAC Status", "FAC %", "FAC Date"]]
+        st.caption("🟦 blue = 1st Year Testing columns   🟧 peach = FAC columns")
+        st.dataframe(style_portfolio(show),
                      use_container_width=True, hide_index=True, height=560)
     with right:
         st.subheader("First Year Testing status")
@@ -536,21 +567,33 @@ with tab2:
             figt.update_yaxes(autorange="reversed")
             figt.add_vline(x=pd.Timestamp(today), line_width=2,
                            line_dash="dash", line_color="#F9A8B4")
+            fyt_rows = tl[tl.Milestone == "First Year Testing"]
+            fac_rows = tl[tl.Milestone == "FAC"]
+            fyt_clr = [GREEN_DONE if st_ == "Completed" else "#F9A8D4"
+                       for st_ in fyt_rows["Status"]]
+            fac_clr = [GREEN_DONE if st_ == "Completed" else "#93C5FD"
+                       for st_ in fac_rows["Status"]]
             figt.add_trace(go.Scatter(
-                x=tl[tl.Milestone == "First Year Testing"]["Date"],
-                y=tl[tl.Milestone == "First Year Testing"]["Site"],
+                x=fyt_rows["Date"], y=fyt_rows["Site"],
                 mode="markers", name="FYT",
-                marker=dict(size=12, color="#F9A8D4", line=dict(width=1, color="#fff"))))
+                text=fyt_rows["Status"], hovertemplate="%{y}<br>FYT: %{text}<extra></extra>",
+                marker=dict(size=13, color=fyt_clr, line=dict(width=1, color="#fff"))))
             figt.add_trace(go.Scatter(
-                x=tl[tl.Milestone == "FAC"]["Date"], y=tl[tl.Milestone == "FAC"]["Site"],
+                x=fac_rows["Date"], y=fac_rows["Site"],
                 mode="markers", name="FAC",
-                marker=dict(size=13, color="#93C5FD", symbol="diamond",
+                text=fac_rows["Status"], hovertemplate="%{y}<br>FAC: %{text}<extra></extra>",
+                marker=dict(size=14, color=fac_clr, symbol="diamond",
                             line=dict(width=1, color="#fff"))))
+            # legend hint for the green = completed convention
+            figt.add_trace(go.Scatter(
+                x=[None], y=[None], mode="markers", name="Completed",
+                marker=dict(size=13, color=GREEN_DONE, line=dict(width=1, color="#fff"))))
             figt.update_layout(height=460, margin=dict(t=20, b=10, l=10, r=10),
                                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                                legend=dict(orientation="h", y=1.08))
             st.plotly_chart(figt, use_container_width=True, key="timeline")
             st.caption("Bar spans First Year Testing start → Final Acceptance. "
+                       "Dots turn green when that milestone is Completed. "
                        "Pink dashed line = reference date.")
 
     colA, colB = st.columns(2)
@@ -664,6 +707,29 @@ with tab4:
             st.plotly_chart(figg, use_container_width=True, key="gantt")
             done_here = int((gt["Status"] == "Done").sum())
             st.caption(f"✓ marks completed tasks · {done_here}/{len(gt)} done for this site.")
+
+    st.subheader("Completed tasks")
+    done_all = tasks_f[tasks_f["Status"] == "Done"].copy()
+    done_all["End"] = done_all["End"].apply(
+        lambda d: f"{d:%d %b %Y}" if pd.notnull(d) else "")
+    fyt_done = done_all[done_all["Phase"] == "First Year Testing"]
+    fac_done = done_all[done_all["Phase"] == "FAC"]
+    dcol1, dcol2 = st.columns(2)
+    with dcol1:
+        st.markdown(f"**🧪 1st Year Testing — {len(fyt_done)} tasks done**")
+        if fyt_done.empty:
+            st.info("No 1st Year Testing tasks marked done yet.")
+        else:
+            st.dataframe(fyt_done[["Site", "Task", "Sub-Task", "Accepted By", "End"]],
+                         use_container_width=True, hide_index=True, height=320)
+    with dcol2:
+        st.markdown(f"**📜 FAC — {len(fac_done)} tasks done**")
+        if fac_done.empty:
+            st.info("No FAC tasks marked done yet.")
+        else:
+            st.dataframe(fac_done[["Site", "Task", "Sub-Task", "Accepted By", "End"]],
+                         use_container_width=True, hide_index=True, height=320)
+    st.write("")
 
     st.subheader("All activities")
     tbl = tasks_f.copy()
