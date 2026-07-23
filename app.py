@@ -491,19 +491,24 @@ st.caption(f"Reference date: **{today:%d %b %Y}** · {len(sites_f)} sites · "
            f"{len(tasks_f)} activities")
 
 # ---- KPI row ----------------------------------------------------------------
-n_done = int((tasks_f["Status"] == "Done").sum())
-n_tasks = len(tasks_f)
-pct_all = round(100 * n_done / n_tasks) if n_tasks else 0
+fyt_t = tasks_f[tasks_f["Phase"] == "First Year Testing"]
+fac_t = tasks_f[tasks_f["Phase"] == "FAC"]
+fyt_done = int((fyt_t["Status"] == "Done").sum())
+fac_done = int((fac_t["Status"] == "Done").sum())
+fyt_pct = round(100 * fyt_done / len(fyt_t)) if len(fyt_t) else 0
+fac_pct = round(100 * fac_done / len(fac_t)) if len(fac_t) else 0
 fac_dates = sites_f["FAC Date"].dropna()
-c1, c2, c3, c4, c5 = st.columns(5)
+next_fac = fac_dates[fac_dates >= today].min() if (fac_dates >= today).any() else None
+
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 kpi(c1, "Sites tracked", len(sites_f), f"{sites_f['Country'].nunique()} countries")
 kpi(c2, "FYT completed", int((sites_f["FYT Status"] == "Completed").sum()),
     f"of {len(sites_f)} sites")
 kpi(c3, "FAC completed", int((sites_f["FAC Status"] == "Completed").sum()),
     f"of {len(sites_f)} sites")
-kpi(c4, "Tasks done", f"{n_done}/{n_tasks}", f"{pct_all}% complete")
-next_fac = fac_dates[fac_dates >= today].min() if (fac_dates >= today).any() else None
-kpi(c5, "Next FAC date", f"{next_fac:%d %b %Y}" if next_fac else "—", "earliest upcoming")
+kpi(c4, "FYT tasks done", f"{fyt_done}/{len(fyt_t)}", f"{fyt_pct}% of 1st-yr tasks")
+kpi(c5, "FAC tasks done", f"{fac_done}/{len(fac_t)}", f"{fac_pct}% of FAC tasks")
+kpi(c6, "Next FAC date", f"{next_fac:%d %b %Y}" if next_fac else "—", "earliest upcoming")
 
 st.write("")
 
